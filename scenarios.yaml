@@ -1,10 +1,3 @@
-# Suggested evaluation scenarios.
-#
-# Each scenario is reachable deterministically against the reference mock server
-# (`mock-api/server.py`). See `mock-api/README.md` for the trigger table.
-#
-# Pick 3-5 of these for your eval harness. The first three are the most important.
-
 scenarios:
   - id: happy_path_booking
     title: Existing patient books a primary care appointment

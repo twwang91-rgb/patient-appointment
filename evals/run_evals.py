@@ -1,16 +1,3 @@
-"""Scenario eval harness.
-
-Runs scripted multi-turn conversations from `scenarios.yaml` against a freshly
-started mock API and asserts on (a) what the user saw, (b) which API calls were
-made, and (c) the workflow outcome / handoff reason recorded in the trace.
-
-    python3 -m evals.run_evals            # deterministic rule-based NLU (no key needed)
-    python3 -m evals.run_evals --llm      # same scripts through the OpenAI NLU
-    python3 -m evals.run_evals -k happy   # only scenarios whose id contains "happy"
-
-Exit code is non-zero if any scenario fails.
-"""
-
 from __future__ import annotations
 
 import argparse

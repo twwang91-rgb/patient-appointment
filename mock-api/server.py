@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""Reference mock server for the Synthetic Scheduling API.
-
-Implements ../openapi/scheduling-api.yaml over the fixtures in ../data/.
-Python 3.8+ standard library only. No pip install, no database.
-
-    python3 mock-api/server.py            # serves http://localhost:4010
-    python3 mock-api/server.py --port 5000
-
-State lives in memory. Restart the server to reset it.
-"""
-
 import argparse
 import json
 import sys

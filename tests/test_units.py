@@ -1,8 +1,3 @@
-"""Offline unit tests for the deterministic pieces (no network, no mock server).
-
-    python3 -m unittest discover -s tests -v
-"""
-
 import os
 import sys
 import unittest
