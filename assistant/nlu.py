@@ -331,6 +331,8 @@ Rules:
 - intent "book_appointment": the user wants a new appointment.
 - intent "find_providers": the user asks which providers/doctors exist, without asking to book.
 - intent "provide_info": the message mainly supplies information the workflow asked for (phone, DOB, zip, specialty, location, slot pick).
+  When `expecting` is non-empty and the message answers it (e.g. "1", "the first one", "primary care", "yes"), use "provide_info",
+  NOT "book_appointment" or "find_providers".
 - Never invent values. If unsure, use null.
 """
 
@@ -416,7 +418,11 @@ class LLMNLU:
         loc = raw.get("location")
         p.location = loc if loc in LOCATIONS + ("any", "unsupported") else baseline.location
         choice = raw.get("slot_choice")
-        if isinstance(choice, int) and 1 <= choice <= len(ctx.shown_slots) and ("slot_choice" in ctx.expecting or "confirmation" in ctx.expecting):
+        if "confirmation" in ctx.expecting and baseline.slot_choice is None:
+            # While confirming, models tend to echo the selected slot as slot_choice. Accept a
+            # slot change here only when the text itself contains a number/ordinal/time.
+            p.slot_choice = None
+        elif isinstance(choice, int) and 1 <= choice <= len(ctx.shown_slots) and ("slot_choice" in ctx.expecting or "confirmation" in ctx.expecting):
             p.slot_choice = choice
         else:
             p.slot_choice = baseline.slot_choice

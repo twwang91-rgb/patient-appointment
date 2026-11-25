@@ -10,7 +10,8 @@ existing appointment, or book a new one against the provided mock scheduling API
 * Works with **or without** an OpenAI key: an LLM parser is used when `OPENAI_API_KEY` is
   set, and a deterministic rule-based parser otherwise (also the fallback if the LLM call
   fails). Both feed the same validated contract into the same workflow code.
-* 13 scripted eval scenarios + 16 unit tests, all runnable offline in a few seconds.
+* 13 scripted eval scenarios + 17 unit tests. The evals pass 13/13 with the rule parser
+  (offline, a few seconds) and 13/13 with the OpenAI parser (`gpt-4o-mini`, about 2 s per turn).
 
 ---
 
@@ -88,7 +89,7 @@ Failure / handoff triggers (all from `mock-api/README.md`): phone `555-9999` + D
 ## 4. Tests and evals (run these)
 
 ```bash
-python3 -m unittest discover -s tests -v      # 16 offline unit tests, < 1 s
+python3 -m unittest discover -s tests -v      # 17 offline unit tests, < 1 s
 python3 -m evals.run_evals                    # 13 scenario evals; starts a fresh mock per scenario
 python3 -m evals.run_evals -v -k slot_conflict  # print the conversation for one scenario
 python3 -m evals.run_evals --llm              # same scripts through the OpenAI parser (needs key)
@@ -138,6 +139,12 @@ human request, unsupported specialty, existing-appointment lookup).
    code; anything invalid is dropped (see `tests/test_units.py::LLMValidationTests`). No
    tool-calling loop, so there is exactly one model call per turn and the model cannot call
    `POST /appointments` by itself.
+   Two things the live model did that the code had to absorb, both caught by the eval suite:
+   it labels mid-flow answers like "1" or "primary care" as `book_appointment` /
+   `find_providers`, so the workflow now routes on *what the state asked for* before it
+   routes on intent; and it echoes the selected slot as `slot_choice` next to a `yes`, so a
+   "yes" always books the slot named in the confirmation prompt and a slot change is only
+   honoured when the text itself contains a number, ordinal, or time.
 2. **PHI minimisation before the model.** Phone numbers and dates of birth are extracted
    locally with regexes and replaced with `<PHONE>` / `<DOB>` *before* the text is sent to
    OpenAI. Natural-language DOBs the regexes miss may still reach the model; its extraction
@@ -184,9 +191,8 @@ human request, unsupported specialty, existing-appointment lookup).
 
 * The rule-based parser is keyword-driven; phrasing outside the eval scripts may fall to
   the generic "what would you like to do?" prompt. The LLM parser is the intended primary.
-* Evals run the LLM path only when a key is present; the LLM path was validated structurally
-  (validation, fallback, masking) with unit tests, and the prompt would need a tuning pass
-  against real transcripts.
+* The LLM path was validated against the 13 scripted scenarios only; paraphrase variants
+  and adversarial inputs (prompt injection in the user message) have not been evaluated yet.
 * No date-range filtering on `/availability` ("next week") and no provider preference
   ("with Dr. King") yet - both are simple additions to the parser contract and `_search_slots`.
 * Single in-process session; no persistence, auth, or channel adapters.
@@ -196,8 +202,8 @@ human request, unsupported specialty, existing-appointment lookup).
 
 ### What I would do next
 
-1. Run the eval suite through the LLM parser and add a small set of paraphrase variants per
-   scenario (same assertions, different wording) to measure parser robustness.
+1. Add paraphrase variants per scenario (same assertions, different wording) and a few
+   injection attempts to measure parser robustness, and track LLM pass rate over time.
 2. Date-range and provider-preference filters; "earliest" should pick slot 1 automatically
    and go straight to the confirmation prompt.
 3. Reschedule / cancel (below), then an appointment-detail lookup by reference number.
@@ -216,8 +222,8 @@ cancelled", "slot taken") handled exactly like booking's conflict path.
 
 ### Production notes
 
-* **Cost / latency at volume:** one small-model call per turn with a ~600-token prompt is
-  roughly $0.0002 and 300-700 ms; the API calls dominate otherwise. Short replies
+* **Cost / latency at volume:** one small-model call per turn with a ~700-token prompt is
+  roughly $0.0002 and measured 1.5-3 s with `gpt-4o-mini` (the mock API adds ~1 ms). Short replies
   ("yes", "2", a bare phone number) are already resolved by the rules layer and could skip
   the model entirely. Cache the provider list; batch nothing else since every call is on
   the user's critical path.

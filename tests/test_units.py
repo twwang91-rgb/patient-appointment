@@ -141,6 +141,19 @@ class LLMValidationTests(unittest.TestCase):
         self.assertEqual(p.specialty, "primary_care")
         self.assertEqual(p.intent, "medical_advice")
 
+    def test_yes_in_confirm_state_ignores_echoed_slot_choice(self):
+        ctx = NLUContext(state="CONFIRM", expecting=["confirmation", "slot_choice"], shown_slots=[
+            {"index": 1, "label": "9:00 AM", "hour": 9, "minute": 0},
+            {"index": 2, "label": "11:00 AM", "hour": 11, "minute": 0},
+        ])
+        raw = {"intent": "provide_info", "slot_choice": 1, "confirmation": "yes"}
+        p = self.nlu._merge(raw, RuleNLU().parse("confirm", ctx), ctx, "confirm")
+        self.assertEqual(p.confirmation, "yes")
+        self.assertIsNone(p.slot_choice)
+        # An explicit change of mind still goes through.
+        p = self.nlu._merge({"intent": "provide_info", "slot_choice": 1}, RuleNLU().parse("actually the 9am", ctx), ctx, "actually the 9am")
+        self.assertEqual(p.slot_choice, 1)
+
     def test_falls_back_to_rules_when_llm_unreachable(self):
         self.nlu.base_url = "http://127.0.0.1:1"
         self.nlu.timeout = 0.5

@@ -101,7 +101,7 @@ class Assistant:
         self.tracer.event("user_turn", text=redact_text(text), state=s.state.value)
 
         try:
-            reply = self._dispatch(parse, text)
+            reply = self._dispatch(parse, text, ctx)
         except ApiUnavailable as err:
             reply = self._handoff(
                 "api_failure",
@@ -163,7 +163,7 @@ class Assistant:
             shown.append({"index": i, "label": _fmt_time(slot["startTime"]), "hour": dt.hour if dt else None, "minute": dt.minute if dt else None})
         return NLUContext(state=s.state.value, expecting=expecting, shown_slots=shown)
 
-    def _dispatch(self, p: Parse, text: str) -> str:
+    def _dispatch(self, p: Parse, text: str, ctx: NLUContext) -> str:
         s = self.session
 
         # 1. Safety / escalation intents win regardless of state (code decides, not the model).
@@ -209,7 +209,20 @@ class Assistant:
                 ),
             )
 
-        # 4. Intent-driven transitions.
+        # 4. If the message answers what the workflow just asked, the answer wins over the
+        #    model's intent label. The model often tags "1" or "primary care" as
+        #    book_appointment / find_providers mid-flow; code, not the model, owns the state.
+        if self._answers_expected(p, ctx):
+            if s.state == State.CONFIRM:
+                return self._handle_confirm(p)
+            if s.state == State.CHOOSE_SLOT:
+                return self._handle_slot_choice(p)
+            if s.state == State.DISAMBIGUATE:
+                return self._handle_disambiguation(p) or self._ask_zip()
+            if s.state in (State.IDENTIFY, State.COLLECT_PREFS):
+                return self._advance()
+
+        # 5. Intent-driven transitions.
         if p.intent == "find_providers":
             return self._provider_lookup(p)
         if p.intent == "book_appointment":
@@ -223,7 +236,7 @@ class Assistant:
             s.goal = "lookup"
             return self._advance()
 
-        # 5. State-specific handling of short answers.
+        # 6. State-specific handling of anything else while mid-flow.
         if s.state == State.CONFIRM:
             return self._handle_confirm(p)
         if s.state == State.CHOOSE_SLOT:
@@ -246,6 +259,24 @@ class Assistant:
             "I can help you find a provider, book a primary care or dermatology appointment, or look up an existing "
             "appointment. Which would you like? (You can also ask for a person at any time.)"
         )
+
+    @staticmethod
+    def _answers_expected(p: Parse, ctx: NLUContext) -> bool:
+        """True when the parse supplies a value the current state asked for."""
+        exp = set(ctx.expecting)
+        if "slot_choice" in exp and p.slot_choice is not None:
+            return True
+        if "confirmation" in exp and p.confirmation is not None:
+            return True
+        if "zip" in exp and p.zip_code is not None:
+            return True
+        if "specialty" in exp and p.specialty in ("primary_care", "dermatology"):
+            return True
+        if "location" in exp and p.location in ("downtown", "uptown", "lakeside", "any"):
+            return True
+        if exp & {"phone", "dob"} and (p.phone or p.dob):
+            return True
+        return False
 
     def _absorb(self, p: Parse) -> None:
         s = self.session
@@ -472,11 +503,13 @@ class Assistant:
 
     def _handle_confirm(self, p: Parse) -> str:
         s = self.session
+        if p.confirmation == "yes":
+            # A "yes" always applies to the slot named in the confirmation prompt, never to a
+            # slot_choice the parser attached to it - the user confirmed what they saw.
+            return self._book()
         if p.slot_choice is not None and s.shown_slots and s.shown_slots[p.slot_choice - 1] is not s.selected_slot:
             # The user changed their mind mid-confirmation: re-confirm the new pick.
             return self._handle_slot_choice(p)
-        if p.confirmation == "yes":
-            return self._book()
         if p.confirmation == "no":
             s.selected_slot = None
             s.state = State.CHOOSE_SLOT
