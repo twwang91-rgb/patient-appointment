@@ -106,21 +106,11 @@ human request, unsupported specialty, existing-appointment lookup).
 
 ## 5. Architecture
 
-```
- user text ──► assistant/nlu.py ──► Parse(intent, entities) ──► assistant/workflow.py ──► reply text
-               LLM (OpenAI JSON)                                 deterministic state machine
-               or RuleNLU; both                                  identity gate, confirmation gate,
-               validated by code                                 failure handling, handoff, rendering
-                                                                          │
-                                                                 assistant/api_client.py
-                                                                 typed errors, 1 retry, redacted traces,
-                                                                 local "confirmed must be True" guard
-                                                                          │
-                                                                 mock-api/server.py  (provided)
- assistant/tracing.py : JSONL events (nlu, api_call, identity_check, booking_confirmed,
-                        handoff_created, turn_summary) with latency, PHI redacted
- assistant/cli.py     : REPL + slash commands        evals/run_evals.py, tests/ : harnesses
-```
+![System architecture](patient-appointment-architecture.png)
+
+Sequence of a typical booking conversation:
+
+![Sequence diagram](sequence-diagram.png)
 
 ### Who decides what
 
@@ -131,114 +121,6 @@ human request, unsupported specialty, existing-appointment lookup).
 | Who the patient is, what slots exist, whether a booking succeeded, the handoff id | **API** | The source of truth; nothing shown to the user originates anywhere else |
 | Every user-facing sentence | **Code templates filled from API data** | Removes the fabrication risk entirely; the model never writes prose |
 
-### Key design decisions
-
-1. **The LLM is a parser, not an agent.** Each turn it receives the workflow state, what the
-   workflow is expecting, the labels of the slots currently on screen, and the user message,
-   and returns one JSON object. Every field is validated against enums/regexes/ranges in
-   code; anything invalid is dropped (see `tests/test_units.py::LLMValidationTests`). No
-   tool-calling loop, so there is exactly one model call per turn and the model cannot call
-   `POST /appointments` by itself.
-   Two things the live model did that the code had to absorb, both caught by the eval suite:
-   it labels mid-flow answers like "1" or "primary care" as `book_appointment` /
-   `find_providers`, so the workflow now routes on *what the state asked for* before it
-   routes on intent; and it echoes the selected slot as `slot_choice` next to a `yes`, so a
-   "yes" always books the slot named in the confirmation prompt and a slot change is only
-   honoured when the text itself contains a number, ordinal, or time.
-2. **PHI minimisation before the model.** Phone numbers and dates of birth are extracted
-   locally with regexes and replaced with `<PHONE>` / `<DOB>` *before* the text is sent to
-   OpenAI. Natural-language DOBs the regexes miss may still reach the model; its extraction
-   is accepted only after validation.
-3. **Defence in depth on the three hard rules.**
-   * *Identity:* `_advance()` refuses to do anything patient-specific until a single
-     patient is resolved; two matches force a zip-code question; two failed lookups (or a
-     non-matching zip) hand off with `identity_unclear`.
-   * *Confirmation:* a booking requires state `CONFIRM` **and** a parsed `yes` to the
-     explicit "Shall I book this?" prompt. The API client additionally raises locally if
-     asked to send `confirmed != True`. Saying "book slot 1, yes" in one message still gets
-     a confirmation prompt - one extra turn is cheap compared with a wrong booking.
-   * *Medical advice:* a deterministic keyword screen runs on every turn in addition to
-     the model's label; either one triggers the `medical_advice` handoff. The reply gives
-     no triage, only the standard "if this could be an emergency call 911" line.
-4. **Fail closed, truthfully.** 503 or connection errors get one retry, then a handoff with
-   `api_failure`. If the handoff endpoint is *also* down (which is what the mock's header
-   does), the user is told plainly and given a real next step (call the front desk). A 409
-   on booking re-fetches live availability rather than reusing the stale list, and the
-   conflicting slot is suppressed for the rest of the session.
-5. **Observability without PHI.** Every event is a JSON line with session, turn, latency
-   and outcome. Identifiers are replaced with short one-way fingerprints so calls can be
-   correlated but not read; free text is masked before logging. The eval harness reads the
-   same trace to make its assertions, so the traces are tested too.
-
-### Assumptions
-
-* Phone numbers in the mock are seven digits (`555-0101`). Input is normalised to that form:
-  10/11-digit numbers are reduced to their last seven digits.
-* A verified patient stays verified for the session; identifiers are discarded from memory
-  as soon as the lookup returns.
-* The user's first name is echoed after verification ("Thanks, Maya") as confirmation that
-  the right record was found. Nothing is echoed when zero or multiple records match.
-* After a no-availability result, "yes"/"staff"/"human" means "please have staff find me a
-  time", so the handoff reason is `no_availability` rather than `user_requested`.
-* Location is asked for explicitly (with an "any" option) because the fixtures make it the
-  deciding factor; specialty is required by the API.
-* A slot that returned 409 is hidden for the rest of the session even if `/availability`
-  still lists it, since the API has demonstrated its availability flag is stale.
-* Times are rendered as returned by the API (fixed `-05:00` offset) without timezone
-  conversion, per `data/README.md`.
-
-### Known limitations
-
-* The rule-based parser is keyword-driven; phrasing outside the eval scripts may fall to
-  the generic "what would you like to do?" prompt. The LLM parser is the intended primary.
-* The LLM path was validated against the 13 scripted scenarios only; paraphrase variants
-  and adversarial inputs (prompt injection in the user message) have not been evaluated yet.
-* No date-range filtering on `/availability` ("next week") and no provider preference
-  ("with Dr. King") yet - both are simple additions to the parser contract and `_search_slots`.
-* Single in-process session; no persistence, auth, or channel adapters.
-* Templated replies are correct but plain. A safe way to add warmth is to let the model
-  paraphrase a *template that already contains the data* and diff-check that every
-  slot/time/id string survives verbatim.
-
-### What I would do next
-
-1. Add paraphrase variants per scenario (same assertions, different wording) and a few
-   injection attempts to measure parser robustness, and track LLM pass rate over time.
-2. Date-range and provider-preference filters; "earliest" should pick slot 1 automatically
-   and go straight to the confirmation prompt.
-3. Reschedule / cancel (below), then an appointment-detail lookup by reference number.
-4. Per-step latency budget alarms and a tiny dashboard over the JSONL traces.
-
-### Adding reschedule and cancel
-
-Both are patient-specific, so they reuse the identity gate unchanged. Cancel: new intent
-`cancel_appointment` → `GET /patients/{id}/appointments` → user picks one from the list
-(same numbered-choice mechanics as slots) → explicit "Cancel appointment X on <time>?
-yes/no" → `DELETE /appointments/{id}` (or `PATCH status=cancelled`). Reschedule = cancel's
-selection step + booking's slot search and confirmation, ideally as one atomic server call
-(`POST /appointments/{id}/reschedule {slotId, confirmed}`) so the patient can never end up
-with zero appointments if the second half fails. Both need a 409/404 path ("already
-cancelled", "slot taken") handled exactly like booking's conflict path.
-
-### Production notes
-
-* **Cost / latency at volume:** one small-model call per turn with a ~700-token prompt is
-  roughly $0.0002 and measured 1.5-3 s with `gpt-4o-mini` (the mock API adds ~1 ms). Short replies
-  ("yes", "2", a bare phone number) are already resolved by the rules layer and could skip
-  the model entirely. Cache the provider list; batch nothing else since every call is on
-  the user's critical path.
-* **Monitoring:** per-turn `turn_summary` events give intent distribution, state
-  transitions, handoff reasons, API status codes and latency. Alert on handoff rate by
-  reason (an `api_failure` spike is the backend; an `identity_unclear` spike is the
-  parser), on 409 rate, and on `rules_fallback` rate (the LLM is degraded).
-* **Rollout / rollback:** ship behind a per-clinic flag with the deterministic parser as the
-  always-available fallback; canary the LLM parser on a slice and compare handoff and
-  completion rates; roll back by flipping the parser flag, not redeploying.
-* **What breaks first with a real scheduling system:** availability is far more volatile
-  (expect many more 409s - hold/reserve a slot before asking for confirmation), identity
-  needs real verification (more than phone+DOB), time zones and DST are real, and PHI sent
-  to the model provider requires a BAA and zero-retention configuration.
-
 ### Repository layout
 
 ```
@@ -248,4 +130,3 @@ tests/           test_units.py (offline unit tests)
 mock-api/ openapi/ data/ policies.md scenarios.yaml assignment.md   (provided package)
 .env.example     environment variables; .env is git-ignored
 ```
-
