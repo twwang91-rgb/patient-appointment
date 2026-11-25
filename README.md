@@ -243,4 +243,3 @@ mock-api/ openapi/ data/ policies.md scenarios.yaml assignment.md   (provided pa
 .env.example     environment variables; .env is git-ignored
 ```
 
-Built with Claude Code as the AI coding assistant.
