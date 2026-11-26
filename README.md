@@ -130,3 +130,83 @@ tests/           test_units.py (offline unit tests)
 mock-api/ openapi/ data/ policies.md scenarios.yaml assignment.md   (provided package)
 .env.example     environment variables; .env is git-ignored
 ```
+
+## Key Design Decisions
+
+### 1. Use the LLM to understand requests, not to make decisions
+
+I use the LLM to understand what the patient wants and extract useful information from their messages. It receives the current conversation state and returns structured JSON, which is validated by the application.
+
+The LLM does not directly call APIs, book appointments, or make business decisions. All these actions are controlled by Python code. This makes the application more predictable, easier to test, and safer.
+
+During testing, I noticed that the LLM sometimes misunderstood short answers like "1" or "primary care." To address this, the workflow prioritizes what it previously asked the patient rather than relying entirely on the intent returned by the LLM.
+
+Similarly, when a patient says "yes" to a booking confirmation, the application books the appointment that was explicitly presented to them, rather than relying on the LLM to select a slot.
+
+### 2. Protect sensitive patient information
+
+Phone numbers and dates of birth are extracted locally and masked before sending messages to the LLM whenever the local parser recognizes them. The application also validates any information extracted by the LLM before using it.
+
+This reduces unnecessary exposure of sensitive patient information. However, the current masking approach may not recognize every natural-language date format.
+
+### 3. Enforce important business rules in code
+
+I implemented three important safety rules directly in the application rather than relying on the LLM.
+
+- **Identity verification:** The patient must be identified before accessing patient-specific information or booking an appointment. If multiple records match, the assistant asks for a ZIP code. If the identity cannot be resolved, the conversation is handed off to staff.
+- **Booking confirmation:** The assistant must receive explicit confirmation before booking an appointment. Even if the patient requests and confirms an appointment in the same message, the assistant asks for a separate confirmation to avoid accidental bookings. The API client also checks that confirmation has been provided.
+- **Medical advice:** The assistant is designed for appointment scheduling, not medical consultation. Both the LLM and a keyword-based check help identify medical questions. These requests are handed off to staff, with standard emergency guidance rather than medical advice.
+
+These rules provide an additional layer of protection even when the LLM returns an unexpected result.
+
+### 4. Handle failures gracefully
+
+The application should never tell a patient that an action was successful when it was not.
+
+If the scheduling API is temporarily unavailable or a connection fails, the application retries once. If the retry fails, it attempts to hand off the conversation to staff.
+
+If the handoff also fails, the assistant explains the situation and recommends contacting the front desk directly.
+
+If an appointment becomes unavailable during booking, the application retrieves the latest availability and presents alternative options instead of continuing with outdated information. The conflicting slot is excluded for the remainder of the session.
+
+### 5. Keep logging simple and useful
+
+I added structured logging to make the application easier to debug and evaluate. Each log records useful information such as the session, conversation turn, processing time, and outcome.
+
+Sensitive information is masked, and identifiers are replaced with fingerprints where appropriate. The evaluation scripts also use these logs to verify that the application behaves as expected.
+
+## Assumptions
+
+To keep the assessment focused and avoid unnecessary complexity, I made the following assumptions:
+
+- **Phone numbers:** The mock API uses seven-digit phone numbers. Longer phone numbers are normalized to their last seven digits to match the sample data.
+- **Patient verification:** Once a patient is verified, they remain verified throughout the current session. Raw identity lookup information is discarded after the lookup.
+- **Personalized responses:** The assistant uses the patient's first name after successful verification. It does not reveal patient names when the identity is unclear.
+- **No available appointments:** If no appointments are available and the patient requests staff assistance, the assistant creates a handoff with the appropriate reason.
+- **Appointment search:** The assistant asks for a specialty and preferred location. Patients can also select any location.
+- **Unavailable slots:** If an appointment fails because it is no longer available, that slot is not offered again during the same session.
+- **Time zones:** Appointment times are displayed as provided by the mock API, without additional timezone conversion.
+
+These assumptions are specific to the assessment and could be revisited for a production application.
+
+## Known Limitations
+
+The current implementation focuses on the core scheduling requirements rather than building a complete production-ready system.
+
+- **Rule-based fallback:** The fallback parser uses simple keywords and patterns, so it may not understand every possible way a patient expresses a request.
+- **Limited LLM evaluation:** The LLM has been evaluated against 13 scripted scenarios. More testing is needed for different wording, unexpected inputs, and prompt injection attempts.
+- **Limited search options:** Patients cannot yet search by a specific date range or preferred provider.
+- **Session management:** The application supports a single in-memory session. It does not include persistent conversation history, authentication, or multi-user support.
+- **Privacy protection:** The current masking approach reduces sensitive information exposure but does not guarantee that all sensitive information is removed.
+- **Conversation experience:** Responses use predefined templates. This keeps them accurate and predictable, but they may feel less natural than fully generated responses.
+
+I intentionally kept these areas simple to stay within the scope of the assessment.
+
+## What I Would Do Next
+
+1. **Improve testing and LLM reliability:** Add more conversation scenarios, different ways of expressing the same request, unexpected inputs, and prompt injection tests. Track how consistently the LLM understands patient requests.
+2. **Improve appointment search:** Support date ranges, preferred providers, and requests such as "find me the earliest available appointment."
+3. **Expand appointment management:** Allow patients to reschedule, cancel, and retrieve details about existing appointments using a reference number.
+4. **Strengthen security and privacy:** Improve sensitive information detection, introduce proper authentication, and implement secure session management before using the application with real patient data.
+5. **Improve monitoring:** Add basic metrics and a dashboard to monitor API failures, response times, booking success rates, and handoff rates.
+6. **Improve the patient experience:** Make responses more conversational while ensuring that appointment details remain accurate and all safety rules are enforced.
